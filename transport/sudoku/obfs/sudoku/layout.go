@@ -14,17 +14,41 @@ type byteLayout struct {
 	padMarker   byte
 	paddingPool []byte
 
-	encodeHint  func(val, pos byte) byte
-	encodeGroup func(group byte) byte
-	decodeGroup func(b byte) (byte, bool)
+	hintIdx     [256]uint8 // pos<<2|val for a hint byte, poisonHint for a hint-class byte no encoder emits, notHint otherwise
+	encodeHint  [4][16]byte
+	encodeGroup [64]byte
+	decodeGroup [256]byte // 0..63 for hints, 0xff for padding/invalid bytes
+}
+
+const (
+	// poisonHint indexes an all-zero set: a hint-class byte no encoder emits,
+	// which keeps the stream from ever decoding.
+	poisonHint = 64
+	notHint    = 0x80
+)
+
+// indexHints derives hintIdx from encodeHint; aliases lists hint-class wire
+// bytes that encodeHint never produces.
+func (l *byteLayout) indexHints(aliases ...byte) {
+	for i := range l.hintIdx {
+		l.hintIdx[i] = notHint
+	}
+	for _, b := range aliases {
+		l.hintIdx[b] = poisonHint
+	}
+	for val := range l.encodeHint {
+		for pos, b := range l.encodeHint[val] {
+			l.hintIdx[b] = uint8(pos<<2 | val)
+		}
+	}
 }
 
 func (l *byteLayout) isHint(b byte) bool {
-	if (b & l.hintMask) == l.hintValue {
-		return true
-	}
-	// ASCII layout maps the single non-printable marker (0x7F) to '\n' on the wire.
-	return l.name == "ascii" && b == '\n'
+	return l != nil && l.hintIdx[b] != notHint
+}
+
+func (l *byteLayout) hintByte(val, pos byte) byte {
+	return l.encodeHint[val&0x03][pos&0x0F]
 }
 
 // resolveLayout picks the byte layout for a single traffic direction.
@@ -50,38 +74,46 @@ func newASCIILayout() *byteLayout {
 	for i := 0; i < 32; i++ {
 		padding = append(padding, byte(0x20+i))
 	}
-	return &byteLayout{
+
+	layout := &byteLayout{
 		name:        "ascii",
 		hintMask:    0x40,
 		hintValue:   0x40,
 		padMarker:   0x3F,
 		paddingPool: padding,
-		encodeHint: func(val, pos byte) byte {
-			b := 0x40 | ((val & 0x03) << 4) | (pos & 0x0F)
-			// Avoid DEL (0x7F) in prefer_ascii mode; map it to '\n' to reduce fingerprint.
-			if b == 0x7F {
-				return '\n'
-			}
-			return b
-		},
-		encodeGroup: func(group byte) byte {
-			b := 0x40 | (group & 0x3F)
-			// Avoid DEL (0x7F) in prefer_ascii mode; map it to '\n' to reduce fingerprint.
-			if b == 0x7F {
-				return '\n'
-			}
-			return b
-		},
-		decodeGroup: func(b byte) (byte, bool) {
-			if b == '\n' {
-				return 0x3F, true
-			}
-			if (b & 0x40) == 0 {
-				return 0, false
-			}
-			return b & 0x3F, true
-		},
 	}
+
+	for val := 0; val < 4; val++ {
+		for pos := 0; pos < 16; pos++ {
+			b := byte(0x40 | (byte(val) << 4) | byte(pos))
+			if b == 0x7F {
+				b = '\n'
+			}
+			layout.encodeHint[val][pos] = b
+		}
+	}
+	for group := 0; group < 64; group++ {
+		b := byte(0x40 | byte(group))
+		if b == 0x7F {
+			b = '\n'
+		}
+		layout.encodeGroup[group] = b
+	}
+	// Every byte with bit 6 set is hint-class on the wire, though only the 63
+	// below 0x7F and '\n' are ever emitted as hints.
+	var aliases []byte
+	for b := 0; b < 256; b++ {
+		layout.decodeGroup[b] = 0xff
+		wire := byte(b)
+		if (wire & 0x40) == 0x40 {
+			layout.decodeGroup[wire] = wire & 0x3F
+			aliases = append(aliases, wire)
+		}
+	}
+	layout.decodeGroup['\n'] = 0x3F
+	layout.indexHints(aliases...)
+
+	return layout
 }
 
 func newEntropyLayout() *byteLayout {
@@ -90,26 +122,35 @@ func newEntropyLayout() *byteLayout {
 		padding = append(padding, byte(0x80+i))
 		padding = append(padding, byte(0x10+i))
 	}
-	return &byteLayout{
+
+	layout := &byteLayout{
 		name:        "entropy",
 		hintMask:    0x90,
 		hintValue:   0x00,
 		padMarker:   0x80,
 		paddingPool: padding,
-		encodeHint: func(val, pos byte) byte {
-			return ((val & 0x03) << 5) | (pos & 0x0F)
-		},
-		encodeGroup: func(group byte) byte {
-			v := group & 0x3F
-			return ((v & 0x30) << 1) | (v & 0x0F)
-		},
-		decodeGroup: func(b byte) (byte, bool) {
-			if (b & 0x90) != 0 {
-				return 0, false
-			}
-			return ((b >> 1) & 0x30) | (b & 0x0F), true
-		},
 	}
+
+	for val := 0; val < 4; val++ {
+		for pos := 0; pos < 16; pos++ {
+			layout.encodeHint[val][pos] = (byte(val) << 5) | byte(pos)
+		}
+	}
+	for group := 0; group < 64; group++ {
+		v := byte(group)
+		layout.encodeGroup[group] = ((v & 0x30) << 1) | (v & 0x0F)
+	}
+	for b := 0; b < 256; b++ {
+		layout.decodeGroup[b] = 0xff
+		wire := byte(b)
+		if (wire & 0x90) != 0 {
+			continue
+		}
+		layout.decodeGroup[wire] = ((wire >> 1) & 0x30) | (wire & 0x0F)
+	}
+	layout.indexHints()
+
+	return layout
 }
 
 func newCustomLayout(pattern string) (*byteLayout, error) {
@@ -162,26 +203,6 @@ func newCustomLayout(pattern string) (*byteLayout, error) {
 		return out
 	}
 
-	decodeGroup := func(b byte) (byte, bool) {
-		if (b & xMask) != xMask {
-			return 0, false
-		}
-		var val, pos byte
-		if b&(1<<pBits[0]) != 0 {
-			val |= 0x02
-		}
-		if b&(1<<pBits[1]) != 0 {
-			val |= 0x01
-		}
-		for i, bit := range vBits {
-			if b&(1<<bit) != 0 {
-				pos |= 1 << (3 - uint8(i))
-			}
-		}
-		group := (val << 4) | (pos & 0x0F)
-		return group, true
-	}
-
 	paddingSet := make(map[byte]struct{})
 	var padding []byte
 	for drop := range xBits {
@@ -202,20 +223,46 @@ func newCustomLayout(pattern string) (*byteLayout, error) {
 		return nil, fmt.Errorf("custom table produced empty padding pool")
 	}
 
-	return &byteLayout{
+	layout := &byteLayout{
 		name:        fmt.Sprintf("custom(%s)", cleaned),
 		hintMask:    xMask,
 		hintValue:   xMask,
 		padMarker:   padding[0],
 		paddingPool: padding,
-		encodeHint: func(val, pos byte) byte {
-			return encodeBits(val, pos, -1)
-		},
-		encodeGroup: func(group byte) byte {
-			val := (group >> 4) & 0x03
-			pos := group & 0x0F
-			return encodeBits(val, pos, -1)
-		},
-		decodeGroup: decodeGroup,
-	}, nil
+	}
+
+	for val := 0; val < 4; val++ {
+		for pos := 0; pos < 16; pos++ {
+			layout.encodeHint[val][pos] = encodeBits(byte(val), byte(pos), -1)
+		}
+	}
+	for group := 0; group < 64; group++ {
+		val := byte(group>>4) & 0x03
+		pos := byte(group) & 0x0F
+		layout.encodeGroup[group] = encodeBits(val, pos, -1)
+	}
+	for b := 0; b < 256; b++ {
+		layout.decodeGroup[b] = 0xff
+		wire := byte(b)
+		if (wire & xMask) != xMask {
+			continue
+		}
+
+		var val, pos byte
+		if wire&(1<<pBits[0]) != 0 {
+			val |= 0x02
+		}
+		if wire&(1<<pBits[1]) != 0 {
+			val |= 0x01
+		}
+		for i, bit := range vBits {
+			if wire&(1<<bit) != 0 {
+				pos |= 1 << (3 - uint8(i))
+			}
+		}
+		layout.decodeGroup[wire] = (val << 4) | pos
+	}
+	layout.indexHints()
+
+	return layout, nil
 }

@@ -1,6 +1,7 @@
 package inbound_test
 
 import (
+	"context"
 	"net"
 	"net/netip"
 	"strconv"
@@ -69,6 +70,20 @@ func TestNewMieru(t *testing.T) {
 					Transport:      "TCP",
 					Users:          map[string]string{"user": "pass"},
 					TrafficPattern: "GgQIARAK",
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid TCP idle timeout",
+			args: args{
+				option: &inbound.MieruOption{
+					BaseOption: inbound.BaseOption{
+						Port: "8080",
+					},
+					Transport:            "TCP",
+					Users:                map[string]string{"user": "pass"},
+					TCPIdleTimeoutSecond: 60,
 				},
 			},
 			wantErr: false,
@@ -161,6 +176,20 @@ func TestNewMieru(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name: "invalid TCP idle timeout",
+			args: args{
+				option: &inbound.MieruOption{
+					BaseOption: inbound.BaseOption{
+						Port: "8080",
+					},
+					Transport:            "TCP",
+					Users:                map[string]string{"user": "pass"},
+					TCPIdleTimeoutSecond: 10,
+				},
+			},
+			wantErr: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -193,21 +222,33 @@ func TestInboundMieru(t *testing.T) {
 
 func testInboundMieruTCP(t *testing.T, handshakeMode string) {
 	t.Parallel()
+	// mieru must listen on a specific port, so we first create a socket, get the port, and then inject it via ListenConfigForAPI
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if !assert.NoError(t, err) {
 		return
 	}
 	port := l.Addr().(*net.TCPAddr).Port
-	l.Close()
+	defer l.Close()
+	lc := mieruTestInboundListenConfig{
+		ListenFn: func(ctx context.Context, network, address string) (net.Listener, error) {
+			assert.Equal(t, l.Addr().String(), address)
+			return l, nil
+		},
+		ListenPacketFn: func(ctx context.Context, network, address string) (net.PacketConn, error) {
+			panic("should not be called")
+		},
+	}
 
 	inboundOptions := inbound.MieruOption{
 		BaseOption: inbound.BaseOption{
-			NameStr: "mieru_inbound_tcp",
-			Listen:  "127.0.0.1",
-			Port:    strconv.Itoa(port),
+			NameStr:            "mieru_inbound_tcp",
+			Listen:             "127.0.0.1",
+			Port:               strconv.Itoa(port),
+			ListenConfigForAPI: lc,
 		},
-		Transport: "TCP",
-		Users:     map[string]string{"test": "password"},
+		Transport:           "TCP",
+		Users:               map[string]string{"test": "password"},
+		UserHintIsMandatory: true,
 	}
 	in, err := inbound.NewMieru(&inboundOptions)
 	if !assert.NoError(t, err) {
@@ -236,6 +277,8 @@ func testInboundMieruTCP(t *testing.T, handshakeMode string) {
 		Password:      "password",
 		HandshakeMode: handshakeMode,
 	}
+	outboundOptions.DialerForAPI = tunnel.NewDialer()
+	outboundOptions.TunnelForAPI = tunnel
 	out, err := outbound.NewMieru(outboundOptions)
 	if !assert.NoError(t, err) {
 		return
@@ -247,21 +290,33 @@ func testInboundMieruTCP(t *testing.T, handshakeMode string) {
 
 func testInboundMieruUDP(t *testing.T, handshakeMode string) {
 	t.Parallel()
+	// mieru must listen on a specific port, so we first create a socket, get the port, and then inject it via ListenConfigForAPI
 	l, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if !assert.NoError(t, err) {
 		return
 	}
 	port := l.LocalAddr().(*net.UDPAddr).Port
-	l.Close()
+	defer l.Close()
+	lc := mieruTestInboundListenConfig{
+		ListenFn: func(ctx context.Context, network, address string) (net.Listener, error) {
+			panic("should not be called")
+		},
+		ListenPacketFn: func(ctx context.Context, network, address string) (net.PacketConn, error) {
+			assert.Equal(t, l.LocalAddr().String(), address)
+			return l, nil
+		},
+	}
 
 	inboundOptions := inbound.MieruOption{
 		BaseOption: inbound.BaseOption{
-			NameStr: "mieru_inbound_udp",
-			Listen:  "127.0.0.1",
-			Port:    strconv.Itoa(port),
+			NameStr:            "mieru_inbound_udp",
+			Listen:             "127.0.0.1",
+			Port:               strconv.Itoa(port),
+			ListenConfigForAPI: lc,
 		},
-		Transport: "UDP",
-		Users:     map[string]string{"test": "password"},
+		Transport:           "UDP",
+		Users:               map[string]string{"test": "password"},
+		UserHintIsMandatory: true,
 	}
 	in, err := inbound.NewMieru(&inboundOptions)
 	if !assert.NoError(t, err) {
@@ -290,6 +345,7 @@ func testInboundMieruUDP(t *testing.T, handshakeMode string) {
 		Password:      "password",
 		HandshakeMode: handshakeMode,
 	}
+	outboundOptions.DialerForAPI = tunnel.NewDialer()
 	out, err := outbound.NewMieru(outboundOptions)
 	if !assert.NoError(t, err) {
 		return
@@ -297,4 +353,17 @@ func testInboundMieruUDP(t *testing.T, handshakeMode string) {
 	defer out.Close()
 
 	tunnel.DoSequentialTest(t, out)
+}
+
+type mieruTestInboundListenConfig struct {
+	ListenFn       func(ctx context.Context, network, address string) (net.Listener, error)
+	ListenPacketFn func(ctx context.Context, network, address string) (net.PacketConn, error)
+}
+
+func (m mieruTestInboundListenConfig) Listen(ctx context.Context, network, address string) (net.Listener, error) {
+	return m.ListenFn(ctx, network, address)
+}
+
+func (m mieruTestInboundListenConfig) ListenPacket(ctx context.Context, network, address string) (net.PacketConn, error) {
+	return m.ListenPacketFn(ctx, network, address)
 }

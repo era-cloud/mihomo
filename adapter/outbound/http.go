@@ -35,6 +35,7 @@ type HttpOption struct {
 	TLS            bool              `proxy:"tls,omitempty"`
 	SNI            string            `proxy:"sni,omitempty"`
 	SkipCertVerify bool              `proxy:"skip-cert-verify,omitempty"`
+	NameCertVerify string            `proxy:"name-cert-verify,omitempty"`
 	Fingerprint    string            `proxy:"fingerprint,omitempty"`
 	Certificate    string            `proxy:"certificate,omitempty"`
 	PrivateKey     string            `proxy:"private-key,omitempty"`
@@ -52,10 +53,13 @@ func (h *Http) StreamConnContext(ctx context.Context, c net.Conn, metadata *C.Me
 		}
 	}
 
-	if err := h.shakeHandContext(ctx, c, metadata); err != nil {
+	// The proxy may send the target's first bytes right behind its response.
+	// They can end up in br, so the returned conn reads them first.
+	br := bufio.NewReader(c)
+	if err := h.shakeHandContext(ctx, c, br, metadata); err != nil {
 		return nil, err
 	}
-	return c, nil
+	return N.WarpConnWithBioReader(c, br), nil
 }
 
 // DialContext implements C.ProxyAdapter
@@ -84,7 +88,7 @@ func (h *Http) ProxyInfo() C.ProxyInfo {
 	return info
 }
 
-func (h *Http) shakeHandContext(ctx context.Context, c net.Conn, metadata *C.Metadata) (err error) {
+func (h *Http) shakeHandContext(ctx context.Context, c net.Conn, br *bufio.Reader, metadata *C.Metadata) (err error) {
 	if ctx.Done() != nil {
 		done := N.SetupContextForConn(ctx, c)
 		defer done(&err)
@@ -119,7 +123,7 @@ func (h *Http) shakeHandContext(ctx context.Context, c net.Conn, metadata *C.Met
 		return err
 	}
 
-	resp, err := http.ReadResponse(bufio.NewReader(c), nil)
+	resp, err := http.ReadResponse(br, nil)
 
 	if err != nil {
 		return err
@@ -157,9 +161,10 @@ func NewHttp(option HttpOption) (*Http, error) {
 				InsecureSkipVerify: option.SkipCertVerify,
 				ServerName:         sni,
 			},
-			Fingerprint: option.Fingerprint,
-			Certificate: option.Certificate,
-			PrivateKey:  option.PrivateKey,
+			Fingerprint:    option.Fingerprint,
+			NameCertVerify: option.NameCertVerify,
+			Certificate:    option.Certificate,
+			PrivateKey:     option.PrivateKey,
 		})
 		if err != nil {
 			return nil, err
@@ -167,17 +172,17 @@ func NewHttp(option HttpOption) (*Http, error) {
 	}
 
 	outbound := &Http{
-		Base: &Base{
-			name:   option.Name,
-			addr:   net.JoinHostPort(option.Server, strconv.Itoa(option.Port)),
-			tp:     C.Http,
-			pdName: option.ProviderName,
-			tfo:    option.TFO,
-			mpTcp:  option.MPTCP,
-			iface:  option.Interface,
-			rmark:  option.RoutingMark,
-			prefer: option.IPVersion,
-		},
+		Base: NewBase(BaseOption{
+			Name:         option.Name,
+			Addr:         net.JoinHostPort(option.Server, strconv.Itoa(option.Port)),
+			Type:         C.Http,
+			ProviderName: option.ProviderName,
+			TFO:          option.TFO,
+			MPTCP:        option.MPTCP,
+			Interface:    option.Interface,
+			RoutingMark:  option.RoutingMark,
+			Prefer:       option.IPVersion,
+		}),
 		user:      option.UserName,
 		pass:      option.Password,
 		tlsConfig: tlsConfig,

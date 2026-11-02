@@ -15,7 +15,7 @@ import (
 	C "github.com/metacubex/mihomo/constant"
 
 	"github.com/metacubex/randv2"
-	"golang.org/x/crypto/ssh"
+	"github.com/metacubex/ssh"
 )
 
 type Ssh struct {
@@ -74,6 +74,13 @@ func (s *Ssh) connect(ctx context.Context, addr string) (client *ssh.Client, err
 		defer done(&err)
 	}
 
+	// Force the SSH transport to shut down when the underlying connection write
+	// fails. handshakeTransport caches this error without closing the transport,
+	// which can leave the shared client permanently unusable while Wait remains
+	// blocked. Closing the connection lets the read and mux loops exit so the
+	// cached client can be discarded and replaced.
+	c = closeOnWriteErrorConn{Conn: c}
+
 	clientConn, chans, reqs, err := ssh.NewClientConn(c, addr, s.config)
 	if err != nil {
 		return nil, err
@@ -93,6 +100,18 @@ func (s *Ssh) connect(ctx context.Context, addr string) (client *ssh.Client, err
 	}()
 
 	return client, nil
+}
+
+type closeOnWriteErrorConn struct {
+	net.Conn
+}
+
+func (c closeOnWriteErrorConn) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p)
+	if err != nil {
+		_ = c.Conn.Close()
+	}
+	return n, err
 }
 
 // ProxyInfo implements C.ProxyAdapter
@@ -182,16 +201,18 @@ func NewSsh(option SshOption) (*Ssh, error) {
 	config.ClientVersion = version
 
 	outbound := &Ssh{
-		Base: &Base{
-			name:   option.Name,
-			addr:   addr,
-			tp:     C.Ssh,
-			pdName: option.ProviderName,
-			udp:    false,
-			iface:  option.Interface,
-			rmark:  option.RoutingMark,
-			prefer: option.IPVersion,
-		},
+		Base: NewBase(BaseOption{
+			Name:         option.Name,
+			Addr:         addr,
+			Type:         C.Ssh,
+			ProviderName: option.ProviderName,
+			UDP:          false,
+			TFO:          option.TFO,
+			MPTCP:        option.MPTCP,
+			Interface:    option.Interface,
+			RoutingMark:  option.RoutingMark,
+			Prefer:       option.IPVersion,
+		}),
 		option: &option,
 		config: &config,
 	}

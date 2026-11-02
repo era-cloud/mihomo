@@ -1,9 +1,8 @@
 package inbound
 
 import (
-	"context"
 	"fmt"
-	"net"
+	"strconv"
 	"sync"
 
 	"github.com/metacubex/mihomo/adapter/inbound"
@@ -27,19 +26,11 @@ type Mieru struct {
 
 type MieruOption struct {
 	BaseOption
-	Transport      string            `inbound:"transport"`
-	Users          map[string]string `inbound:"users"`
-	TrafficPattern string            `inbound:"traffic-pattern,omitempty"`
-}
-
-type mieruListenerFactory struct{}
-
-func (mieruListenerFactory) Listen(ctx context.Context, network, address string) (net.Listener, error) {
-	return inbound.ListenContext(ctx, network, address)
-}
-
-func (mieruListenerFactory) ListenPacket(ctx context.Context, network, address string) (net.PacketConn, error) {
-	return inbound.ListenPacketContext(ctx, network, address)
+	Transport            string            `inbound:"transport"`
+	Users                map[string]string `inbound:"users"`
+	TrafficPattern       string            `inbound:"traffic-pattern,omitempty"`
+	UserHintIsMandatory  bool              `inbound:"user-hint-is-mandatory,omitempty"`
+	TCPIdleTimeoutSecond int               `inbound:"tcp-idle-timeout,omitempty"`
 }
 
 func NewMieru(option *MieruOption) (*Mieru, error) {
@@ -158,14 +149,24 @@ func buildMieruServerConfig(option *MieruOption, ports utils.IntRanges[uint16]) 
 	}
 	var trafficPattern *mierupb.TrafficPattern
 	trafficPattern, _ = mierutp.Decode(option.TrafficPattern)
+	advancedSettings := &mierupb.ServerAdvancedSettings{}
+	if option.UserHintIsMandatory {
+		advancedSettings.UserHintIsMandatory = proto.Bool(true)
+	}
+	if option.TCPIdleTimeoutSecond != 0 {
+		advancedSettings.TcpIdleTimeout = proto.String(strconv.Itoa(option.TCPIdleTimeoutSecond) + "s")
+	}
+	lc := option.ListenConfig()
 	return &mieruserver.ServerConfig{
 		Config: &mierupb.ServerConfig{
-			PortBindings:   portBindings,
-			Users:          users,
-			TrafficPattern: trafficPattern,
+			ListenIPAddress:  proto.String(option.Listen),
+			PortBindings:     portBindings,
+			Users:            users,
+			TrafficPattern:   trafficPattern,
+			AdvancedSettings: advancedSettings,
 		},
-		StreamListenerFactory: mieruListenerFactory{},
-		PacketListenerFactory: mieruListenerFactory{},
+		StreamListenerFactory: lc,
+		PacketListenerFactory: lc,
 	}, nil
 }
 
@@ -192,6 +193,9 @@ func validateMieruOption(option *MieruOption) error {
 		if err := mierutp.Validate(trafficPattern); err != nil {
 			return fmt.Errorf("invalid traffic pattern %q: %w", option.TrafficPattern, err)
 		}
+	}
+	if option.TCPIdleTimeoutSecond != 0 && option.TCPIdleTimeoutSecond < 60 {
+		return fmt.Errorf("invalid TCP idle timeout: mininum supported value is 60")
 	}
 	return nil
 }
