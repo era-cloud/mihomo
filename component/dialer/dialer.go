@@ -115,7 +115,15 @@ func listenConfig(network, address string, rAddrPort netip.AddrPort, opt option)
 			// avoid "The requested address is not valid in its context."
 			opt.interfaceName = ""
 		}
-		if opt.interfaceName != "" {
+		if opt.routingMark == 0 {
+			opt.routingMark = int(DefaultRoutingMark.Load())
+		}
+		// On kernel 6.8+ a socket that has both SO_BINDTODEVICE and a non-zero
+		// SO_MARK cannot match the incoming SYN-ACK (early demux lookup fails on
+		// sk_bound_dev_if) and the kernel replies with RST, so the connection
+		// times out. When a routing mark is set the policy route already picks
+		// the egress interface, hence skip the device binding in that case.
+		if opt.interfaceName != "" && opt.routingMark == 0 {
 			bind := bindIfaceToListenConfig
 			if opt.fallbackBind {
 				bind = fallbackBindIfaceToListenConfig
@@ -125,9 +133,6 @@ func listenConfig(network, address string, rAddrPort netip.AddrPort, opt option)
 				return nil, "", err
 			}
 			address = addr
-		}
-		if opt.routingMark == 0 {
-			opt.routingMark = int(DefaultRoutingMark.Load())
 		}
 		if opt.routingMark != 0 {
 			bindMarkToListenConfig(opt.routingMark, lc, network, address)
@@ -168,7 +173,12 @@ func dialContext(ctx context.Context, network string, destination netip.Addr, po
 				opt.interfaceName = finder.FindInterfaceName(destination)
 			}
 		}
-		if opt.interfaceName != "" {
+		if opt.routingMark == 0 {
+			opt.routingMark = int(DefaultRoutingMark.Load())
+		}
+		// See the comment in ListenPacket: skip the device binding when a routing
+		// mark is set, otherwise the kernel answers the SYN-ACK with RST.
+		if opt.interfaceName != "" && opt.routingMark == 0 {
 			bind := bindIfaceToDialer
 			if opt.fallbackBind {
 				bind = fallbackBindIfaceToDialer
@@ -176,9 +186,6 @@ func dialContext(ctx context.Context, network string, destination netip.Addr, po
 			if err := bind(opt.interfaceName, dialer, network, destination); err != nil {
 				return nil, err
 			}
-		}
-		if opt.routingMark == 0 {
-			opt.routingMark = int(DefaultRoutingMark.Load())
 		}
 		if opt.routingMark != 0 {
 			bindMarkToDialer(opt.routingMark, dialer, network, destination)
@@ -203,12 +210,14 @@ func ICMPControl(destination netip.Addr) func(network, address string, conn sysc
 				interfaceName = finder.FindInterfaceName(destination)
 			}
 		}
-		if interfaceName != "" {
+		routingMark := int(DefaultRoutingMark.Load())
+		// See the comment in ListenPacket: skip the device binding when a routing
+		// mark is set, otherwise the kernel answers the SYN-ACK with RST.
+		if interfaceName != "" && routingMark == 0 {
 			if err := bindIfaceToDialer(interfaceName, dialer, network, destination); err != nil {
 				return err
 			}
 		}
-		routingMark := int(DefaultRoutingMark.Load())
 		if routingMark != 0 {
 			bindMarkToDialer(routingMark, dialer, network, destination)
 		}

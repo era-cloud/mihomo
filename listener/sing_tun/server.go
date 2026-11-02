@@ -614,6 +614,7 @@ func (l *Listener) OnReload() {
 type cDialerInterfaceFinder struct {
 	tunName                 string
 	defaultInterfaceMonitor tun.DefaultInterfaceMonitor
+	fallbackWarnOnce        sync.Once
 }
 
 func (d *cDialerInterfaceFinder) DefaultInterfaceName(destination netip.Addr) string {
@@ -626,19 +627,34 @@ func (d *cDialerInterfaceFinder) DefaultInterfaceName(destination netip.Addr) st
 	return ""
 }
 
+// logFallback reports a non-fatal auto-detect fallback. This runs on the
+// per-connection path (up to three probes per dial), and the fallbacks are
+// expected when the tun is the default route or when IPv6 is disabled, so only
+// the first occurrence is logged as a warning and the rest at debug level.
+func (d *cDialerInterfaceFinder) logFallback(format string, args ...any) {
+	warned := false
+	d.fallbackWarnOnce.Do(func() {
+		warned = true
+		log.Warnln(format, args...)
+	})
+	if !warned {
+		log.Debugln(format, args...)
+	}
+}
+
 func (d *cDialerInterfaceFinder) FindInterfaceName(destination netip.Addr) string {
 	for _, dest := range []netip.Addr{destination, netip.IPv4Unspecified(), netip.IPv6Unspecified()} {
 		autoDetectInterfaceName := d.DefaultInterfaceName(dest)
 		if autoDetectInterfaceName == d.tunName {
-			log.Warnln("[TUN] Auto detect interface for %s get same name with tun", destination.String())
+			d.logFallback("[TUN] Auto detect interface for %s get same name with tun", destination.String())
 		} else if autoDetectInterfaceName == "" || autoDetectInterfaceName == "<nil>" {
-			log.Warnln("[TUN] Auto detect interface for %s get empty name.", destination.String())
+			d.logFallback("[TUN] Auto detect interface for %s get empty name.", destination.String())
 		} else {
 			log.Debugln("[TUN] Auto detect interface for %s --> %s", destination, autoDetectInterfaceName)
 			return autoDetectInterfaceName
 		}
 	}
-	log.Warnln("[TUN] Auto detect interface for %s failed, return '<invalid>' to avoid lookback", destination)
+	d.logFallback("[TUN] Auto detect interface for %s failed, return '<invalid>' to avoid lookback", destination)
 	return "<invalid>"
 }
 
