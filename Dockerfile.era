@@ -1,0 +1,15 @@
+# era-cloud/mihomo 自建镜像：源码构建（便于后续打 nftables 补丁），与上游同样的关键构建标签
+FROM golang:alpine AS build
+WORKDIR /src
+COPY . .
+ARG VERSION=era-unknown
+RUN CGO_ENABLED=0 go build -tags with_gvisor -trimpath \
+      -ldflags "-X 'github.com/metacubex/mihomo/constant.Version=${VERSION}' -w -s -buildid=" \
+      -o /out/mihomo .
+
+FROM alpine:latest
+LABEL org.opencontainers.image.source="https://github.com/era-cloud/mihomo"
+RUN apk add --no-cache ca-certificates tzdata iptables
+VOLUME ["/root/.config/mihomo/"]
+COPY --from=build /out/mihomo /mihomo
+ENTRYPOINT ["/mihomo"]
