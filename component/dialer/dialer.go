@@ -118,11 +118,13 @@ func listenConfig(network, address string, rAddrPort netip.AddrPort, opt option)
 		if opt.routingMark == 0 {
 			opt.routingMark = int(DefaultRoutingMark.Load())
 		}
-		// On kernel 6.8+ a socket that has both SO_BINDTODEVICE and a non-zero
-		// SO_MARK cannot match the incoming SYN-ACK (early demux lookup fails on
-		// sk_bound_dev_if) and the kernel replies with RST, so the connection
-		// times out. When a routing mark is set the policy route already picks
-		// the egress interface, hence skip the device binding in that case.
+		// SO_BINDTODEVICE makes the socket accept replies only on the bound
+		// device (sk_bound_dev_if). When several interfaces share one subnet
+		// (bridge plus macvlan shim, ARP flux) or the bound device is not the
+		// one the reply arrives on, the kernel cannot match the SYN-ACK to the
+		// socket and answers with RST, so the connection times out. When a
+		// routing mark is set the policy route already selects the egress
+		// interface, so skip the device binding in that case.
 		if opt.interfaceName != "" && opt.routingMark == 0 {
 			bind := bindIfaceToListenConfig
 			if opt.fallbackBind {
@@ -177,7 +179,8 @@ func dialContext(ctx context.Context, network string, destination netip.Addr, po
 			opt.routingMark = int(DefaultRoutingMark.Load())
 		}
 		// See the comment in ListenPacket: skip the device binding when a routing
-		// mark is set, otherwise the kernel answers the SYN-ACK with RST.
+		// mark is set, otherwise replies arriving on another interface cannot be
+		// matched and the kernel answers with RST.
 		if opt.interfaceName != "" && opt.routingMark == 0 {
 			bind := bindIfaceToDialer
 			if opt.fallbackBind {
@@ -212,7 +215,8 @@ func ICMPControl(destination netip.Addr) func(network, address string, conn sysc
 		}
 		routingMark := int(DefaultRoutingMark.Load())
 		// See the comment in ListenPacket: skip the device binding when a routing
-		// mark is set, otherwise the kernel answers the SYN-ACK with RST.
+		// mark is set, otherwise replies arriving on another interface cannot be
+		// matched and the kernel answers with RST.
 		if interfaceName != "" && routingMark == 0 {
 			if err := bindIfaceToDialer(interfaceName, dialer, network, destination); err != nil {
 				return err
