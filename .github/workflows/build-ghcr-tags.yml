@@ -1,9 +1,9 @@
 name: build-ghcr-tags
 
-# 每 6 小时：同步上游 tags 到本 fork → 解析最新 release tag → 有变化才构建
+# 仅手动触发（2026-11-07 决策）：服务端已改用官方 docker.io/metacubex/mihomo，
+# 自建镜像保留为「上游出问题时的应急发布通道」，不再定时消耗 Actions 分钟。
+# 需要时：Actions → 本 workflow → Run workflow（会同步 tags 并构建最新 release tag）。
 on:
-  schedule:
-    - cron: '0 */6 * * *'
   workflow_dispatch:
 
 permissions:
